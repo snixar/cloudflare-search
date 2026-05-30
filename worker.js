@@ -240,14 +240,12 @@ async function executeMCPTool(name, args) {
 }
 
 /**
- * Send an SSE response
+ * Send a JSON-RPC response
  */
-function sseResponse(data) {
-  const body = `event: message\ndata: ${JSON.stringify(data)}\n\n`;
-  return new Response(body, {
+function jsonRpcResponse(data) {
+  return new Response(JSON.stringify(data), {
     headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
+      "Content-Type": "application/json",
       "mcp-protocol-version": "2025-03-26",
       ...CORS_HEADERS,
     },
@@ -374,7 +372,7 @@ async function handleMCP(request) {
         });
       }
 
-      return sseResponse(result);
+      return jsonRpcResponse(result);
     } catch (error) {
       console.error("[MCP] Error:", error);
       return mcpErrorResponse(500, -32603, "Internal error");
