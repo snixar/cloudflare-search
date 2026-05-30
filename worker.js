@@ -218,7 +218,7 @@ function formatMCPResults(result) {
  * Execute an MCP tool by calling the Worker's own /search endpoint.
  * This keeps the MCP layer lightweight and reuses the existing search pipeline.
  */
-async function executeMCPTool(name, args, requestUrl) {
+async function executeMCPTool(name, args, requestUrl, mcpToken) {
   if (!args || !args.query || typeof args.query !== "string") {
     return {
       content: [{ type: "text", text: "Error: query must be a non-empty string" }],
@@ -231,6 +231,9 @@ async function executeMCPTool(name, args, requestUrl) {
     const params = new URLSearchParams({ q: args.query });
     if (args.engines?.length > 0) {
       params.append("engines", args.engines.join(","));
+    }
+    if (mcpToken) {
+      params.append("token", mcpToken);
     }
 
     const res = await fetch(`${base}/search?${params.toString()}`);
@@ -289,7 +292,7 @@ function mcpErrorResponse(status, code, message) {
 /**
  * Handle a single MCP JSON-RPC message
  */
-async function handleMCPMessage(message, requestUrl) {
+async function handleMCPMessage(message, requestUrl, mcpToken) {
   const { method, id } = message;
 
   switch (method) {
@@ -321,6 +324,7 @@ async function handleMCPMessage(message, requestUrl) {
           message.params?.name,
           message.params?.arguments,
           requestUrl,
+          mcpToken,
         ),
       };
 
@@ -372,8 +376,11 @@ async function handleMCP(request) {
       return mcpErrorResponse(400, -32600, "Invalid Request: missing method");
     }
 
+    const mcpToken =
+      request.headers.get("Authorization")?.replace(/^Bearer\s+/i, "") || null;
+
     try {
-      const result = await handleMCPMessage(body, request.url);
+      const result = await handleMCPMessage(body, request.url, mcpToken);
 
       if (result === null) {
         // Notification - return 202 with no body
