@@ -64,11 +64,25 @@ Edit your config file ([configuration guide](https://modelcontextprotocol.io/qui
 - `CF_SEARCH_URL`: Worker deployment URL (required)
 - `CF_SEARCH_TOKEN`: Auth token (required if your Worker has `TOKEN` configured)
 
-#### Streamable HTTP Transport (Alternative)
+#### Streamable HTTP Transport (Direct Worker Connection)
 
-You can also run the MCP server as an HTTP server with SSE streaming support:
+The Worker has a built-in `/mcp` endpoint. You can connect your MCP client directly without the CLI:
 
-1. Set the `CF_SEARCH_HTTP_PORT` environment variable to start the HTTP server:
+```json
+{
+  "mcpServers": {
+    "cloudflare-search": {
+      "url": "https://your-worker.workers.dev/mcp"
+    }
+  }
+}
+```
+
+This works with any MCP client that supports Streamable HTTP transport (e.g., Claude Code, OpenClaw).
+
+#### Streamable HTTP via CLI (Alternative)
+
+You can also run the MCP server locally with both stdio and HTTP:
 
 ```json
 {
@@ -87,20 +101,12 @@ You can also run the MCP server as an HTTP server with SSE streaming support:
 }
 ```
 
-2. Connect your MCP client to `http://127.0.0.1:3000/mcp` using the Streamable HTTP transport.
-
 **Streamable HTTP Environment Variables**:
 
 | Variable              | Default      | Description                                |
 | --------------------- | ------------ | ------------------------------------------ |
 | `CF_SEARCH_HTTP_PORT` | (disabled)   | Port for the Streamable HTTP server        |
 | `CF_SEARCH_HTTP_HOST` | `127.0.0.1`  | Host address to bind the HTTP server       |
-
-When `CF_SEARCH_HTTP_PORT` is set:
-- The MCP server starts **both** stdio and HTTP transports
-- Stdio remains available for subprocess-based clients
-- HTTP clients can connect via `http://host:port/mcp`
-- SSE streaming is automatically supported for server-initiated messages
 
 #### 3. Verify Installation
 

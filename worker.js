@@ -118,7 +118,7 @@ async function searchAll({ query, engines }) {
  */
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "*",
   "Access-Control-Max-Age": "86400",
 };
@@ -140,6 +140,206 @@ function verifyToken(request, paramToken) {
 }
 
 /**
+ * MCP tool definitions
+ */
+const MCP_TOOLS = [
+  {
+    name: "web_search",
+    description:
+      "Search the web for current information, news, or any topic. " +
+      "Uses multiple engines (Brave, DuckDuckGo, Google, Bing) simultaneously " +
+      "and returns aggregated results with source URLs. " +
+      "Use this when you need real-time information not in your training data.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "The search query string" },
+        engines: {
+          type: "array",
+          items: {
+            type: "string",
+            enum: ["google", "brave", "duckduckgo", "bing"],
+          },
+          description: "Optional: Search engines to use",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "search",
+    description:
+      "Search across multiple search engines (Google, Brave, DuckDuckGo, Bing) and return aggregated results.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "The search query string" },
+        engines: {
+          type: "array",
+          items: {
+            type: "string",
+            enum: ["google", "brave", "duckduckgo", "bing"],
+          },
+          description: "Optional: Search engines to use",
+        },
+      },
+      required: ["query"],
+    },
+  },
+];
+
+/**
+ * Format search results for MCP response
+ */
+function formatMCPResults(result) {
+  const formatted = result.results
+    .map(
+      (item, i) =>
+        `${i + 1}. [${item.engine.toUpperCase()}] ${item.title}\n   ${item.description}\n   ${item.url}`,
+    )
+    .join("\n\n");
+
+  return [
+    `Search Query: "${result.query}"`,
+    `Total Results: ${result.number_of_results}`,
+    `Engines Used: ${result.enabled_engines.join(", ")}`,
+    result.unresponsive_engines.length > 0
+      ? `Unresponsive Engines: ${result.unresponsive_engines.join(", ")}`
+      : null,
+    "",
+    "Results:",
+    formatted,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/**
+ * Execute an MCP tool
+ */
+async function executeMCPTool(name, args) {
+  if (!args || !args.query || typeof args.query !== "string") {
+    return {
+      content: [{ type: "text", text: "Error: query must be a non-empty string" }],
+      isError: true,
+    };
+  }
+
+  try {
+    const result = await searchAll({ query: args.query, engines: args.engines });
+    return {
+      content: [{ type: "text", text: formatMCPResults(result) }],
+    };
+  } catch (error) {
+    return {
+      content: [{ type: "text", text: `Search failed: ${error.message}` }],
+      isError: true,
+    };
+  }
+}
+
+/**
+ * Send an SSE response
+ */
+function sseResponse(data) {
+  const body = `event: message\ndata: ${JSON.stringify(data)}\n\n`;
+  return new Response(body, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      ...CORS_HEADERS,
+    },
+  });
+}
+
+/**
+ * Handle a single MCP JSON-RPC message
+ */
+async function handleMCPMessage(message) {
+  const { method, id } = message;
+
+  switch (method) {
+    case "initialize":
+      return {
+        jsonrpc: "2.0",
+        id,
+        result: {
+          protocolVersion: "2025-03-26",
+          capabilities: { tools: {} },
+          serverInfo: { name: "cloudflare-search", version: "1.2.0" },
+        },
+      };
+
+    case "tools/list":
+      return {
+        jsonrpc: "2.0",
+        id,
+        result: { tools: MCP_TOOLS },
+      };
+
+    case "tools/call":
+      return {
+        jsonrpc: "2.0",
+        id,
+        result: await executeMCPTool(
+          message.params?.name,
+          message.params?.arguments,
+        ),
+      };
+
+    case "notifications/initialized":
+      return null; // No response for notifications
+
+    default:
+      return {
+        jsonrpc: "2.0",
+        id,
+        error: {
+          code: -32601,
+          message: `Method not found: ${method}`,
+        },
+      };
+  }
+}
+
+/**
+ * Handle MCP Streamable HTTP requests
+ */
+async function handleMCP(request) {
+  // GET: SSE stream (server-initiated messages)
+  if (request.method === "GET") {
+    return sseResponse({
+      jsonrpc: "2.0",
+      method: "notifications/message",
+      params: { level: "info", data: "SSE stream connected (stateless mode)" },
+    });
+  }
+
+  // DELETE: Session termination (no-op in stateless mode)
+  if (request.method === "DELETE") {
+    return new Response("OK", { status: 200, headers: CORS_HEADERS });
+  }
+
+  // POST: JSON-RPC messages
+  if (request.method === "POST") {
+    const body = await request.json();
+    const result = await handleMCPMessage(body);
+
+    if (result === null) {
+      // Notification - return 202 with no body
+      return new Response(null, { status: 202, headers: CORS_HEADERS });
+    }
+
+    return sseResponse(result);
+  }
+
+  return new Response("Method Not Allowed", {
+    status: 405,
+    headers: CORS_HEADERS,
+  });
+}
+
+/**
  * Main request handler
  */
 async function handleRequest(request) {
@@ -150,8 +350,12 @@ async function handleRequest(request) {
     return new Response(null, { headers: CORS_HEADERS });
   }
 
-  // Only allow GET and POST
-  if (request.method !== "GET" && request.method !== "POST") {
+  // Only allow GET, POST, and DELETE
+  if (
+    request.method !== "GET" &&
+    request.method !== "POST" &&
+    request.method !== "DELETE"
+  ) {
     return new Response("Method Not Allowed", {
       status: 405,
       headers: CORS_HEADERS,
@@ -167,7 +371,12 @@ async function handleRequest(request) {
     params = Object.fromEntries(url.searchParams.entries());
   }
 
-  // Verify authentication token
+  // /mcp path: handle MCP Streamable HTTP (skip token auth)
+  if (url.pathname === "/mcp") {
+    return handleMCP(request);
+  }
+
+  // Verify authentication token (for / and /search only)
   if (!verifyToken(request, params.token)) {
     return new Response(
       JSON.stringify({
