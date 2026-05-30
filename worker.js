@@ -215,9 +215,10 @@ function formatMCPResults(result) {
 }
 
 /**
- * Execute an MCP tool
+ * Execute an MCP tool by calling the Worker's own /search endpoint.
+ * This keeps the MCP layer lightweight and reuses the existing search pipeline.
  */
-async function executeMCPTool(name, args) {
+async function executeMCPTool(name, args, requestUrl) {
   if (!args || !args.query || typeof args.query !== "string") {
     return {
       content: [{ type: "text", text: "Error: query must be a non-empty string" }],
@@ -226,7 +227,18 @@ async function executeMCPTool(name, args) {
   }
 
   try {
-    const result = await searchAll({ query: args.query, engines: args.engines });
+    const base = new URL(requestUrl).origin;
+    const params = new URLSearchParams({ q: args.query });
+    if (args.engines?.length > 0) {
+      params.append("engines", args.engines.join(","));
+    }
+
+    const res = await fetch(`${base}/search?${params.toString()}`);
+    if (!res.ok) {
+      throw new Error(`Search API returned ${res.status}`);
+    }
+
+    const result = await res.json();
     return {
       content: [{ type: "text", text: formatMCPResults(result) }],
     };
@@ -277,7 +289,7 @@ function mcpErrorResponse(status, code, message) {
 /**
  * Handle a single MCP JSON-RPC message
  */
-async function handleMCPMessage(message) {
+async function handleMCPMessage(message, requestUrl) {
   const { method, id } = message;
 
   switch (method) {
@@ -308,6 +320,7 @@ async function handleMCPMessage(message) {
         result: await executeMCPTool(
           message.params?.name,
           message.params?.arguments,
+          requestUrl,
         ),
       };
 
@@ -360,7 +373,7 @@ async function handleMCP(request) {
     }
 
     try {
-      const result = await handleMCPMessage(body);
+      const result = await handleMCPMessage(body, request.url);
 
       if (result === null) {
         // Notification - return 202 with no body
