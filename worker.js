@@ -289,6 +289,8 @@ async function handleMCPMessage(message) {
           protocolVersion: "2025-03-26",
           capabilities: { tools: {} },
           serverInfo: { name: "cloudflare-search", version: "1.2.0" },
+          instructions:
+            "Use web_search or search to query across multiple engines (google, brave, duckduckgo, bing).",
         },
       };
 
