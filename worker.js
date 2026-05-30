@@ -362,18 +362,18 @@ async function handleRequest(request) {
     });
   }
 
-  // Parse query parameters
+  // /mcp path: handle MCP Streamable HTTP (before body parsing)
+  if (url.pathname === "/mcp") {
+    return handleMCP(request);
+  }
+
+  // Parse query parameters (for / and /search)
   let params = {};
   if (request.method === "POST") {
     const formData = await request.formData();
     params = Object.fromEntries(formData.entries());
   } else {
     params = Object.fromEntries(url.searchParams.entries());
-  }
-
-  // /mcp path: handle MCP Streamable HTTP (skip token auth)
-  if (url.pathname === "/mcp") {
-    return handleMCP(request);
   }
 
   // Verify authentication token (for / and /search only)
