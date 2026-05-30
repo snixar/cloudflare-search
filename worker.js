@@ -247,9 +247,31 @@ function sseResponse(data) {
     headers: {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
+      "mcp-protocol-version": "2025-03-26",
       ...CORS_HEADERS,
     },
   });
+}
+
+/**
+ * Send a JSON error response (used when request can't be processed)
+ */
+function mcpErrorResponse(status, code, message) {
+  return new Response(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      error: { code, message },
+      id: null,
+    }),
+    {
+      status,
+      headers: {
+        "Content-Type": "application/json",
+        "mcp-protocol-version": "2025-03-26",
+        ...CORS_HEADERS,
+      },
+    },
+  );
 }
 
 /**
@@ -306,12 +328,14 @@ async function handleMCPMessage(message) {
  * Handle MCP Streamable HTTP requests
  */
 async function handleMCP(request) {
-  // GET: SSE stream (server-initiated messages)
+  // GET: SSE stream (server-to-client notifications, stateless no-op)
   if (request.method === "GET") {
-    return sseResponse({
-      jsonrpc: "2.0",
-      method: "notifications/message",
-      params: { level: "info", data: "SSE stream connected (stateless mode)" },
+    return new Response(null, {
+      status: 200,
+      headers: {
+        "mcp-protocol-version": "2025-03-26",
+        ...CORS_HEADERS,
+      },
     });
   }
 
@@ -322,15 +346,36 @@ async function handleMCP(request) {
 
   // POST: JSON-RPC messages
   if (request.method === "POST") {
-    const body = await request.json();
-    const result = await handleMCPMessage(body);
-
-    if (result === null) {
-      // Notification - return 202 with no body
-      return new Response(null, { status: 202, headers: CORS_HEADERS });
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return mcpErrorResponse(400, -32700, "Parse error: invalid JSON");
     }
 
-    return sseResponse(result);
+    if (!body || typeof body.method !== "string") {
+      return mcpErrorResponse(400, -32600, "Invalid Request: missing method");
+    }
+
+    try {
+      const result = await handleMCPMessage(body);
+
+      if (result === null) {
+        // Notification - return 202 with no body
+        return new Response(null, {
+          status: 202,
+          headers: {
+            "mcp-protocol-version": "2025-03-26",
+            ...CORS_HEADERS,
+          },
+        });
+      }
+
+      return sseResponse(result);
+    } catch (error) {
+      console.error("[MCP] Error:", error);
+      return mcpErrorResponse(500, -32603, "Internal error");
+    }
   }
 
   return new Response("Method Not Allowed", {
