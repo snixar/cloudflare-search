@@ -6,21 +6,33 @@
  * This MCP server provides access to the Cloudflare Search API,
  * allowing AI assistants to search across multiple search engines.
  *
+ * Supports two transports:
+ * - Stdio (default): Standard input/output, used by Claude Code, OpenClaw, etc.
+ * - Streamable HTTP: HTTP-based transport with SSE streaming support
+ *
  * Environment Variables:
  * - CF_SEARCH_URL: The URL of your Cloudflare Search Worker (required)
  * - CF_SEARCH_TOKEN: Authentication token for the search API (optional)
+ * - CF_SEARCH_HTTP_PORT: Enable Streamable HTTP server on this port (optional)
+ * - CF_SEARCH_HTTP_HOST: Host to bind HTTP server (default: 127.0.0.1)
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import http from "node:http";
 
 // Get configuration from environment variables
 const CF_SEARCH_URL = process.env.CF_SEARCH_URL;
 const CF_SEARCH_TOKEN = process.env.CF_SEARCH_TOKEN;
+const CF_SEARCH_HTTP_PORT = process.env.CF_SEARCH_HTTP_PORT
+  ? parseInt(process.env.CF_SEARCH_HTTP_PORT, 10)
+  : null;
+const CF_SEARCH_HTTP_HOST = process.env.CF_SEARCH_HTTP_HOST || "127.0.0.1";
 
 if (!CF_SEARCH_URL) {
   console.error("Error: CF_SEARCH_URL environment variable is required");
@@ -60,21 +72,6 @@ async function searchAPI(query, engines = null) {
   }
 }
 
-/**
- * Create and configure the MCP server
- */
-const server = new Server(
-  {
-    name: "cloudflare-search",
-    version: "1.1.0",
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  },
-);
-
 const SEARCH_INPUT_SCHEMA = {
   type: "object",
   properties: {
@@ -97,106 +94,215 @@ const SEARCH_INPUT_SCHEMA = {
 };
 
 /**
- * Handler for listing available tools
+ * Format search results into readable text
  */
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
-      {
-        name: "web_search",
-        description:
-          "Search the web for current information, news, or any topic. " +
-          "Uses multiple engines (Brave, DuckDuckGo, Google, Bing) simultaneously " +
-          "and returns aggregated results with source URLs. " +
-          "Use this when you need real-time information not in your training data. ",
-        inputSchema: SEARCH_INPUT_SCHEMA,
-      },
-      {
-        name: "search",
-        description:
-          "Search across multiple search engines (Google, Brave, DuckDuckGo, Bing) and return aggregated results. " +
-          "This tool provides comprehensive search results from multiple sources, with source attribution for each result.",
-        inputSchema: SEARCH_INPUT_SCHEMA,
-      },
-    ],
-  };
-});
+function formatSearchResults(result) {
+  const formattedResults = result.results
+    .map((item, index) => {
+      return `${index + 1}. [${item.engine.toUpperCase()}] ${item.title}\n   ${item.description}\n   ${item.url}`;
+    })
+    .join("\n\n");
+
+  const summary = [
+    `Search Query: "${result.query}"`,
+    `Total Results: ${result.number_of_results}`,
+    `Engines Used: ${result.enabled_engines.join(", ")}`,
+    result.unresponsive_engines.length > 0
+      ? `Unresponsive Engines: ${result.unresponsive_engines.join(", ")}`
+      : null,
+    "",
+    "Results:",
+    formattedResults,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  return summary;
+}
 
 /**
- * Handler for tool execution
+ * Handle tool execution
  */
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  if (
-    request.params.name !== "search" &&
-    request.params.name !== "web_search"
-  ) {
-    throw new Error(`Unknown tool: ${request.params.name}`);
+async function handleToolCall(toolName, args) {
+  if (toolName !== "search" && toolName !== "web_search") {
+    throw new Error(`Unknown tool: ${toolName}`);
   }
 
-  if (!request.params.arguments) {
+  if (!args) {
     throw new Error("Missing arguments");
   }
 
-  const { query, engines } = request.params.arguments;
+  const { query, engines } = args;
 
   if (!query || typeof query !== "string") {
     throw new Error("Query must be a non-empty string");
   }
 
-  try {
-    const result = await searchAPI(query, engines);
+  const result = await searchAPI(query, engines);
 
-    // Format the results for better readability
-    const formattedResults = result.results
-      .map((item, index) => {
-        return `${index + 1}. [${item.engine.toUpperCase()}] ${item.title}\n   ${item.description}\n   ${item.url}`;
-      })
-      .join("\n\n");
+  return {
+    content: [
+      {
+        type: "text",
+        text: formatSearchResults(result),
+      },
+    ],
+  };
+}
 
-    const summary = [
-      `Search Query: "${result.query}"`,
-      `Total Results: ${result.number_of_results}`,
-      `Engines Used: ${result.enabled_engines.join(", ")}`,
-      result.unresponsive_engines.length > 0
-        ? `Unresponsive Engines: ${result.unresponsive_engines.join(", ")}`
-        : null,
-      "",
-      "Results:",
-      formattedResults,
-    ]
-      .filter(Boolean)
-      .join("\n");
+/**
+ * Create and configure a new MCP Server instance.
+ * Each transport needs its own server instance.
+ */
+function createServer() {
+  const server = new Server(
+    {
+      name: "cloudflare-search",
+      version: "1.2.0",
+    },
+    {
+      capabilities: {
+        tools: {},
+      },
+    },
+  );
 
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
-      content: [
+      tools: [
         {
-          type: "text",
-          text: summary,
+          name: "web_search",
+          description:
+            "Search the web for current information, news, or any topic. " +
+            "Uses multiple engines (Brave, DuckDuckGo, Google, Bing) simultaneously " +
+            "and returns aggregated results with source URLs. " +
+            "Use this when you need real-time information not in your training data. ",
+          inputSchema: SEARCH_INPUT_SCHEMA,
+        },
+        {
+          name: "search",
+          description:
+            "Search across multiple search engines (Google, Brave, DuckDuckGo, Bing) and return aggregated results. " +
+            "This tool provides comprehensive search results from multiple sources, with source attribution for each result.",
+          inputSchema: SEARCH_INPUT_SCHEMA,
         },
       ],
     };
-  } catch (error) {
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Search failed: ${error.message}`,
-        },
-      ],
-      isError: true,
-    };
-  }
-});
+  });
+
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    try {
+      return await handleToolCall(
+        request.params.name,
+        request.params.arguments,
+      );
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Search failed: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
+  return server;
+}
 
 /**
  * Start the server
  */
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  // Always start stdio transport
+  const stdioServer = createServer();
+  const stdioTransport = new StdioServerTransport();
+  await stdioServer.connect(stdioTransport);
 
   console.error("Cloudflare Search MCP Server running on stdio");
   console.error(`Connected to: ${CF_SEARCH_URL}`);
+
+  // Start Streamable HTTP server if port is configured
+  if (CF_SEARCH_HTTP_PORT) {
+    const httpServer = http.createServer(async (req, res) => {
+      // CORS headers
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader(
+        "Access-Control-Allow-Methods",
+        "GET, POST, DELETE, OPTIONS",
+      );
+      res.setHeader("Access-Control-Allow-Headers", "*");
+      res.setHeader("Access-Control-Max-Age", "86400");
+
+      if (req.method === "OPTIONS") {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+
+      // Health check endpoint
+      if (req.url === "/health") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            status: "ok",
+            name: "cloudflare-search",
+            version: "1.2.0",
+            transports: ["stdio", "streamable-http"],
+          }),
+        );
+        return;
+      }
+
+      // MCP Streamable HTTP endpoint
+      if (req.url === "/mcp" || req.url?.startsWith("/mcp")) {
+        try {
+          // Stateless mode: create a new transport + server per request
+          const transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: undefined,
+          });
+          const server = createServer();
+          await server.connect(transport);
+          await transport.handleRequest(req, res);
+        } catch (error) {
+          console.error("Error handling MCP HTTP request:", error);
+          if (!res.headersSent) {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                jsonrpc: "2.0",
+                error: {
+                  code: -32603,
+                  message: "Internal server error",
+                },
+                id: null,
+              }),
+            );
+          }
+        }
+        return;
+      }
+
+      // 404 for other paths
+      res.writeHead(404);
+      res.end("Not Found");
+    });
+
+    httpServer.listen(CF_SEARCH_HTTP_PORT, CF_SEARCH_HTTP_HOST, () => {
+      console.error(
+        `Streamable HTTP server listening on http://${CF_SEARCH_HTTP_HOST}:${CF_SEARCH_HTTP_PORT}`,
+      );
+      console.error(
+        `MCP endpoint: http://${CF_SEARCH_HTTP_HOST}:${CF_SEARCH_HTTP_PORT}/mcp`,
+      );
+    });
+  } else {
+    console.error(
+      "Streamable HTTP server not started (set CF_SEARCH_HTTP_PORT to enable)",
+    );
+  }
 }
 
 main().catch((error) => {

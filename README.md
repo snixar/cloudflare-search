@@ -12,6 +12,7 @@ English | [中文](./README.zh.md)
 
 - 🔍 **Multi-engine Aggregation** - Use multiple search engines at the same time (Google, Brave, DuckDuckGo, Bing)
 - 🤖 **AI Enhanced (MCP)** - Native support for Model Context Protocol, one-click search tool integration for **OpenClaw** / **Claude Code** / **Codex**
+- 🌐 **Dual Transport** - Supports both **Stdio** (subprocess) and **Streamable HTTP** (HTTP + SSE) transports
 - ⚡ **Parallel Search** - All search engines are requested concurrently for faster results
 - 🛡️ **Fault Tolerance** - Failure of a single engine does not affect others; unresponsive engines are automatically marked
 - ⏱️ **Timeout Control** - Configurable request timeout to avoid long waits
@@ -62,6 +63,44 @@ Edit your config file ([configuration guide](https://modelcontextprotocol.io/qui
 
 - `CF_SEARCH_URL`: Worker deployment URL (required)
 - `CF_SEARCH_TOKEN`: Auth token (required if your Worker has `TOKEN` configured)
+
+#### Streamable HTTP Transport (Alternative)
+
+You can also run the MCP server as an HTTP server with SSE streaming support:
+
+1. Set the `CF_SEARCH_HTTP_PORT` environment variable to start the HTTP server:
+
+```json
+{
+  "mcpServers": {
+    "cloudflare-search": {
+      "command": "npx",
+      "args": ["-y", "@yrobot/cf-search-mcp"],
+      "env": {
+        "CF_SEARCH_URL": "https://your-worker.workers.dev",
+        "CF_SEARCH_TOKEN": "your-token-here",
+        "CF_SEARCH_HTTP_PORT": "3000",
+        "CF_SEARCH_HTTP_HOST": "127.0.0.1"
+      }
+    }
+  }
+}
+```
+
+2. Connect your MCP client to `http://127.0.0.1:3000/mcp` using the Streamable HTTP transport.
+
+**Streamable HTTP Environment Variables**:
+
+| Variable              | Default      | Description                                |
+| --------------------- | ------------ | ------------------------------------------ |
+| `CF_SEARCH_HTTP_PORT` | (disabled)   | Port for the Streamable HTTP server        |
+| `CF_SEARCH_HTTP_HOST` | `127.0.0.1`  | Host address to bind the HTTP server       |
+
+When `CF_SEARCH_HTTP_PORT` is set:
+- The MCP server starts **both** stdio and HTTP transports
+- Stdio remains available for subprocess-based clients
+- HTTP clients can connect via `http://host:port/mcp`
+- SSE streaming is automatically supported for server-initiated messages
 
 #### 3. Verify Installation
 
